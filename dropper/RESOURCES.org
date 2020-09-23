@@ -1,0 +1,7 @@
+- [[https://tools.ietf.org/html/rfc1952][GZIP RFC]]
+- [[https://tools.ietf.org/html/rfc1950][ZLIB RFC]]
+- [[https://tools.ietf.org/html/rfc1951][DEFLATE RFC]]
+- [[https://tools.ietf.org/html/rfc7932][Brotli RFC]]
+- [[https://en.wikipedia.org/wiki/Lempel%E2%80%93Ziv%E2%80%93Markov_chain_algorithm][LZMA Wikipedia with Impl Details]]
+- [[https://www.7-zip.org/sdk.html][LZMA SDK]]
+- [[https://tukaani.org/xz/xz-file-format.txt][XZ Spec]]
