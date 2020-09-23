@@ -97,35 +97,44 @@ size_t strlen(const char *s) {
 #define strchr __builtin_strchr
 #define strlen __builtin_strlen
 
+#define do_syscall_def_helper(n, a1, a2, a3, a4, a5, a6, ...)         \
+  static uint64_t syscall_##n(uint64_t number                         \
+                              a1(uint64_t arg1) a2(uint64_t arg2)     \
+                              a3(uint64_t arg3) a4(uint64_t arg4)     \
+                              a5(uint64_t arg5) a6(uint64_t arg6)) {  \
+    register uint64_t result                                          \
+      a1(arg1_ asm("rdi") = arg1)                                     \
+      a2(arg2_ asm("rsi") = arg2)                                     \
+      a3(arg3_ asm("rdx") = arg3)                                     \
+      a4(arg4_ asm("r10") = arg4)                                     \
+      a5(arg5_ asm("r8")  = arg5)                                     \
+      a6(arg6_ asm("r9")  = arg6);                                    \
+    asm volatile("syscall"                                            \
+                 : "=a" (result)                                      \
+                 : "a" (number)                                       \
+                   a1("r" (arg1_)) a2("r" (arg2_)) a3("r" (arg3_))    \
+                   a4("r" (arg4_)) a5("r" (arg5_)) a6("r" (arg6_))    \
+                 : "memory", "rcx", "r11");                           \
+    return result;                                                    \
+  }
+#define do_syscall_def(...) do_syscall_def_helper(__VA_ARGS__, n, n, n, n, n, n)
 
-static uint64_t syscall_nargs(uint64_t number, int nargs, ...) {
-  va_list ap;
-  uint64_t res = 0;
-  register uint64_t arg1 asm("rdi"), arg2 asm("rsi"), arg3 asm("rdx"),
-    arg4 asm("r10"), arg5 asm("r8"), arg6 asm("r9");
-  va_start(ap, nargs);
-  if (nargs >= 1)
-    arg1 = va_arg(ap, uint64_t);
-  if (nargs >= 2)
-    arg2 = va_arg(ap, uint64_t);
-  if (nargs >= 3)
-    arg3 = va_arg(ap, uint64_t);
-  if (nargs >= 4)
-    arg4 = va_arg(ap, uint64_t);
-  if (nargs >= 5)
-    arg5 = va_arg(ap, uint64_t);
-  if (nargs >= 6)
-    arg6 = va_arg(ap, uint64_t);
-  va_end(ap);
-  asm volatile("syscall" : "=a" (res) : "a" (number), "r" (arg1), "r" (arg2), "r" (arg3), "r" (arg4), "r" (arg5), "r" (arg6) : "memory", "rcx", "r11");
-  return res;
-}
+#define y(...) , __VA_ARGS__
+#define n(...)
+do_syscall_def(1, y)
+do_syscall_def(2, y, y)
+do_syscall_def(3, y, y, y)
+do_syscall_def(4, y, y, y, y)
+do_syscall_def(5, y, y, y, y, y)
+do_syscall_def(6, y, y, y, y, y, y)
+#undef y
+#undef n
 
-#define syscall_helper(nr, arg1, arg2, arg3, arg4, arg5, arg6, nargs, ...) \
-  syscall_nargs((nr), (nargs),                                          \
-                (uint64_t) (arg1), (uint64_t) (arg2), (uint64_t) (arg3), \
-                (uint64_t) (arg4), (uint64_t) (arg5), (uint64_t) (arg6))
-#define syscall(nr, ...) syscall_helper((nr), __VA_ARGS__, 6, 5, 4, 3, 2, 1)
+#define argcount_helper(p1, p2, p3, p4, p5, p6, n, ...) n
+#define argcount(...) argcount_helper(__VA_ARGS__, 6, 5, 4, 3, 2, 1)
+#define syscall_helper2(n, nr, ...) syscall_##n(nr, __VA_ARGS__)
+#define syscall_helper(...) syscall_helper2(__VA_ARGS__)
+#define syscall(nr, ...) syscall_helper(argcount(__VA_ARGS__), nr, __VA_ARGS__)
 
 noreturn void _Exit(int exit_code) {
   while (1)
@@ -168,7 +177,9 @@ static int read_more_bytes(struct buffer *buffer) {
   if (buffer->fill >= buffer->size)
     return -1;
 retry:
-  res = syscall(__NR_read, buffer->fd, buffer->data + buffer->fill, buffer->size - buffer->fill);
+  res = syscall(__NR_read, buffer->fd,
+                (uintptr_t) (void *) (buffer->data + buffer->fill),
+                buffer->size - buffer->fill);
   if (res == -EINTR)
     goto retry;
   if (res > (uint64_t) -4096 || res == 0) {
@@ -396,7 +407,8 @@ static void *cecf_load_blob_from_fd(const struct cecf_info *info, int fd) {
       size_t size = sizeof buffer;
       if (size > offset)
         size = offset;
-      if ((res = syscall(__NR_read, fd, (void *) buffer, size)) > (uint64_t) -4096)
+      if ((res = syscall(__NR_read, fd,
+                         (uintptr_t) (void *) buffer, size)) > (uint64_t) -4096)
         if (res == -EINTR)
           continue;
         else
@@ -408,7 +420,7 @@ static void *cecf_load_blob_from_fd(const struct cecf_info *info, int fd) {
     }
   }
 
-  if ((res = syscall(__NR_mmap, NULL, (size_t) info->blob_size,
+  if ((res = syscall(__NR_mmap, (uintptr_t) NULL, (size_t) info->blob_size,
                      PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0))
       > (uint64_t) -4096)
     return NULL;
@@ -421,7 +433,7 @@ static void *cecf_load_blob_from_fd(const struct cecf_info *info, int fd) {
   if (ensure_buffer(&blob_buffer, info->blob_size) == 0)
     return blob;
 
-  syscall(__NR_munmap, (void *) blob, (size_t) info->blob_size);
+  syscall(__NR_munmap, (uintptr_t) (void *) blob, (size_t) info->blob_size);
   return NULL;
 }
 
@@ -486,7 +498,8 @@ static int load_elf(struct elf_info *info, unsigned char *elf, size_t elf_size) 
   if (lo >= hi || ehdr.e_entry > hi)
     return -1;
 
-  if ((res = syscall(__NR_mmap, NULL, hi - lo, PROT_EXEC | PROT_READ | PROT_WRITE,
+  if ((res = syscall(__NR_mmap, (uintptr_t) NULL, hi - lo,
+                     PROT_EXEC | PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) > (uint64_t) -4096)
     return -1;
   unsigned char *load_base = (void *) res;
@@ -502,7 +515,8 @@ static int load_elf(struct elf_info *info, unsigned char *elf, size_t elf_size) 
     if (pos < start_page) {
       size_t distance = (start_page - pos) / 4096 * 4096;
       if (distance > 0)
-        syscall(__NR_munmap, (void *) (load_base + (start_page - distance - lo)),
+        syscall(__NR_munmap,
+                (uintptr_t) (void *) (load_base + (start_page - distance - lo)),
                 distance);
     }
     memcpy(load_base + (phdr.p_vaddr - lo), elf + phdr.p_offset, phdr.p_filesz);
@@ -512,7 +526,7 @@ static int load_elf(struct elf_info *info, unsigned char *elf, size_t elf_size) 
       (phdr.p_flags & PF_X ? PROT_EXEC : 0) |
       (phdr.p_flags & PF_W ? PROT_WRITE : 0) |
       (phdr.p_flags & PF_R ? PROT_READ : 0);
-    syscall(__NR_mprotect, (void *) (load_base + (start_page - lo)),
+    syscall(__NR_mprotect, (uintptr_t) (void *) (load_base + (start_page - lo)),
             (phdr.p_vaddr - start_page) + phdr.p_memsz, new_prot);
 
     if (phdr.p_vaddr + phdr.p_memsz > pos)
@@ -546,9 +560,11 @@ static void elf_launch(const struct elf_info *info,
     ++auxv_size;
 
   unsigned char random[16];
-  if (syscall(__NR_getrandom, (void *) random, sizeof random, GRND_INSECURE)
+  if (syscall(__NR_getrandom, (uintptr_t) (void *) random, sizeof random,
+              GRND_INSECURE)
       == -EINVAL)
-    syscall(__NR_getrandom, (void *) random, sizeof random, GRND_NONBLOCK);
+    syscall(__NR_getrandom, (uintptr_t) (void *) random, sizeof random,
+            GRND_NONBLOCK);
   /* Lots of failure cases - ENOSYS, EAGAIN, ...
    * But there's not much else we can do, and I'm not a fan of falling
    * back to RDRAND (or urandom), so let's just pretend that whatever
@@ -565,7 +581,7 @@ static void elf_launch(const struct elf_info *info,
   size_t params_size = (vectors_size + extra_size + 15) / 16 * 16;
   size_t stack_size = (8 * 1024 * 1024 + params_size + 4095) / 4096 * 4096;
 
-  if ((res = syscall(__NR_mmap, NULL, stack_size,
+  if ((res = syscall(__NR_mmap, (uintptr_t) NULL, stack_size,
                      (info->exec_stack ? PROT_EXEC : 0) | PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_GROWSDOWN | MAP_STACK,
                      -1, 0)) > (uint64_t) -4096)
@@ -672,7 +688,7 @@ static void try_run_from_fd(int fd, const char *const *argv,
   struct elf_info elf_info;
   if (elf == NULL || load_elf(&elf_info, elf, cecf_info.blob_size) != 0)
     _Exit(1);
-  syscall(__NR_munmap, elf, cecf_info.blob_size);
+  syscall(__NR_munmap, (uintptr_t) (void *) elf, cecf_info.blob_size);
 
   elf_launch(&elf_info, argv, envp, vdso);
   _Exit(1);
@@ -683,7 +699,8 @@ int _start(void *argv_, void *envp, void *vdso) {
   char **argv = (char **) argv_;
 
   int fd = 0;
-  if ((res = syscall(__NR_openat, (int) AT_FDCWD, (const char *) argv[0],
+  if ((res = syscall(__NR_openat, (int) AT_FDCWD,
+                     (uintptr_t) (const char *) argv[0],
                      (int) (O_RDONLY | O_CLOEXEC)))
       <= (uint64_t) -4096) {
     try_run_from_fd((int) res, argv_, envp, vdso);
