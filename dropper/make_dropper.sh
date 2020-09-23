@@ -18,7 +18,7 @@ trap cleanup EXIT
 compile_loader() {
     gcc -ffreestanding -nostdlib \
         -static-pie -Wl,--oformat=binary \
-        -Os -flto \
+        -Os -fno-asynchronous-unwind-tables -flto \
         -o "${tmpdir}/loader.bin" "${dir}/loader.c" -lgcc \
         "$@"
 }
