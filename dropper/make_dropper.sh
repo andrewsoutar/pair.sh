@@ -57,13 +57,19 @@ try_${lang}() {
     set -- \$("\$1" ${get_free_fds_cmd}) \\
         '$(echo "${loader_start_addr}")' \\
         "\$0" "\$@"
-    eval "exec \$1<&1" 1<<EOF
-$(python "${dir}/compress.py" "${dir}/${lang}/${load_script}")
-\$(get_trampoline)
-EOF
-    exec "\$5" ${run_script_from_fd_cmd} "\$@"
-    eval "exec \$1<&-"
-    eval "exec \$2<&-"
+    eval "exec \$1<&1" 1<&0
+    {
+        echo '$(python "${dir}/compress.py" "${dir}/${lang}/${load_script}")'
+        get_trampoline
+        set +e
+    } | {
+        eval "exec \$2<&1" 1<&0
+        exec <&\$1
+        eval "exec \$1<&-"
+        shift
+        exec "\$4" ${run_script_from_fd_cmd} "\$@"
+    }
+    exit $?
 }
 EOSCRIPT
     ); done
@@ -85,14 +91,29 @@ echo "Failed!"
 exit 1
 
 EOSCRIPT
+}
 
+write_output_file() {
+    header_str="CECFHDR@"
+    script_len=$({ echo $header_str; write_script; } | wc -c)
+    num_len_chars=1
+    while true; do
+        offset=$((script_len + num_len_chars))
+        if (( $(echo -n $offset | wc -c) <= num_len_chars )); then
+            break;
+        fi
+        (( ++num_len_chars ))
+    done
+
+    printf '\n\n# %s%-*s\n' "$header_str" "$num_len_chars" "$offset"
+    write_script
     python "${dir}/mkheader.py" "${binary}"
     cat "${binary}"
 }
 
 if [[ $output && $output != "-" ]]; then
-    write_script >"${tmpdir}/script.sh"
+    write_output_file >"${tmpdir}/script.sh"
     mv "${tmpdir}/script.sh" "${output}"
 else
-    write_script
+    write_output_file
 fi
