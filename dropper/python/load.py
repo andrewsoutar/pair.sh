@@ -15,6 +15,7 @@ def find_libc_fn(name, restype):
 tramp_file = os.fdopen(int(sys.argv[2]), "rb")
 tramp = zlib.decompress(binascii.a2b_base64(tramp_file.read()), -15)
 tramp_file.close()
+os.close(int(sys.argv[1]))
 
 try:
   import mmap
