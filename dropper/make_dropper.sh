@@ -41,10 +41,8 @@ write_script() {
 
 set -e
 
-load_trampoline() {
-    eval "exec \$1<&1" 1<<"EOF"
-$(python "${dir}/compress.py" "${tmpdir}/loader.bin")
-EOF
+get_trampoline() {
+    echo '$(python "${dir}/compress.py" "${tmpdir}/loader.bin")'
 }
 
 EOSCRIPT
@@ -59,9 +57,9 @@ try_${lang}() {
     set -- \$("\$1" ${get_free_fds_cmd}) \\
         '$(echo "${loader_start_addr}")' \\
         "\$0" "\$@"
-    load_trampoline "\$2"
-    eval "exec \$1<&1" 1<<"EOF"
+    eval "exec \$1<&1" 1<<EOF
 $(python "${dir}/compress.py" "${dir}/${lang}/${load_script}")
+\$(get_trampoline)
 EOF
     exec "\$5" ${run_script_from_fd_cmd} "\$@"
     eval "exec \$1<&-"

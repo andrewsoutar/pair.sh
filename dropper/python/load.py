@@ -12,10 +12,9 @@ def find_libc_fn(name, restype):
   fn.restype = restype
   return fn
 
-tramp_file = os.fdopen(int(sys.argv[2]), "rb")
+tramp_file = os.fdopen(int(sys.argv[1]), "rb")
 tramp = zlib.decompress(binascii.a2b_base64(tramp_file.read()), -15)
 tramp_file.close()
-os.close(int(sys.argv[1]))
 
 try:
   import mmap
