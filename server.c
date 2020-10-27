@@ -197,7 +197,8 @@ static int io_uring_submit_all(struct io_uring_desc *ring, bool wait) {
 retry:
   ret = syscall(SYS_io_uring_enter, ring->fd,
                 ring->sq_cached_tail - ring->sq_cached_head,
-                wait ? 1 : 0, wait ? IORING_ENTER_GETEVENTS : 0, NULL);
+                wait ? 1 : 0, wait ? IORING_ENTER_GETEVENTS : 0,
+                NULL, sizeof (sigset_t));
   if (ret < 0) {
     ret = -errno;
     if (ret == -EINTR)
