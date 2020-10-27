@@ -207,6 +207,7 @@ retry:
       ret = 0;
   }
 
+  __atomic_load(ring->sq_head_p, &ring->sq_cached_head, __ATOMIC_ACQUIRE);
   return ret;
 }
 
