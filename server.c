@@ -191,9 +191,6 @@ static void destroy_io_uring(struct io_uring_desc *d) {
 static int io_uring_submit_all(struct io_uring_desc *ring, bool wait) {
   int ret;
 
-  /* RELEASE some free completions to the kernel */
-  __atomic_store(ring->cq_head_p, &ring->cq_cached_head, __ATOMIC_RELEASE);
-
 retry:
   ret = syscall(SYS_io_uring_enter, ring->fd,
                 ring->sq_cached_tail - ring->sq_cached_head,
@@ -566,6 +563,8 @@ static int run_server() {
       cqe_res = cqe->res;
       flags = cqe->flags;
       ++ring.cq_cached_head;
+      /* RELEASE completion back to the kernel */
+      __atomic_store(ring.cq_head_p, &ring.cq_cached_head, __ATOMIC_RELEASE);
 
       if (cb != NULL) {
         io_callback_pop(&ring.pending_ios, cb);
