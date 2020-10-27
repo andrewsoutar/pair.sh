@@ -55,7 +55,7 @@ static void io_callback_pop(struct io_callback **head_p,
   cb->next->prev = cb->prev;
   cb->prev->next = cb->next;
   if (*head_p == cb)
-    *head_p = cb->next;
+    *head_p = cb->next == cb ? NULL : cb->next;
   cb->next = cb->prev = NULL;
 }
 
