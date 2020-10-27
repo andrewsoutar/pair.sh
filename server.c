@@ -541,7 +541,7 @@ static int run_server() {
   while (ring.pending_ios != NULL || ring.retry_ios != NULL) {
     struct io_callback *cb;
     ret = io_uring_submit_all(&ring, ring.retry_ios == NULL);
-    if (ret)
+    if (ret < 0)
       terminate_all_ios(&ring, -ret);
 
     for (;;) {
