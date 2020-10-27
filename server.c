@@ -298,15 +298,19 @@ static void terminate_all_ios(struct io_uring_desc *ring, int err) {
     return;
   }
 
+  log_error(err, "terminating");
+
   ring->terminated = true;
 
   /* First cancel all the outstanding ios */
   list = ring->pending_ios;
-  cb = list;
-  do {
-    io_cancel(ring, cb);
-    cb = cb->next;
-  } while (cb != list);
+  if (list != NULL) {
+    cb = list;
+    do {
+      io_cancel(ring, cb);
+      cb = cb->next;
+    } while (cb != list);
+  }
 
   /* Now cancel all the unsubmitted ios */
   list = ring->retry_ios;
