@@ -7,6 +7,7 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <signal.h>
 #include <string.h>
 
 #include <unistd.h>
@@ -96,6 +97,7 @@ struct io_uring_desc {
   struct io_callback *pending_ios, *retry_ios;
   __u32 sq_cached_head, sq_cached_tail, cq_cached_head, cq_cached_tail;
 
+  sigset_t sigset;
   bool terminated;
 };
 
@@ -191,16 +193,13 @@ static void destroy_io_uring(struct io_uring_desc *d) {
 static int io_uring_submit_all(struct io_uring_desc *ring, bool wait) {
   int ret;
 
-retry:
   ret = syscall(SYS_io_uring_enter, ring->fd,
                 ring->sq_cached_tail - ring->sq_cached_head,
                 wait ? 1 : 0, wait ? IORING_ENTER_GETEVENTS : 0,
-                NULL, sizeof (sigset_t));
+                &ring->sigset, _NSIG / 8);
   if (ret < 0) {
     ret = -errno;
-    if (ret == -EINTR)
-      goto retry;
-    else if (ret == -EAGAIN || ret == -EBUSY)
+    if (ret == -EAGAIN || ret == -EINTR || ret == -EBUSY)
       ret = 0;
   }
 
@@ -461,6 +460,13 @@ static int io_callback_dispatch(struct io_uring_desc *ring,
 }
 
 
+static volatile sig_atomic_t terminating_from_signal = 0;
+void sighand_terminate(int sig) {
+  (void) sig;
+  terminating_from_signal = 1;
+}
+
+
 static int create_tcp_listen_sock(const struct sockaddr *addr,
                                   socklen_t addrlen) {
   int sock, flag, ret;
@@ -509,6 +515,53 @@ static int run_server() {
   int ret, ipv4_sock, ipv6_sock;
   struct sockaddr_in ipv4_addr = { 0 };
   struct sockaddr_in6 ipv6_addr = { 0 };
+  struct sigaction sigact = {
+    .sa_handler = &sighand_terminate,
+    .sa_flags = SA_RESETHAND
+  };
+  sigset_t blockset;
+
+  ret = sigemptyset(&blockset);
+  if (ret) {
+    ret = -errno;
+    log_error(-ret, "sigemptyset");
+    return ret;
+  }
+
+  ret = sigaddset(&blockset, SIGINT);
+  if (ret) {
+    ret = -errno;
+    log_error(-ret, "sigaddset(SIGINT)");
+    return ret;
+  }
+
+  ret = sigaddset(&blockset, SIGTERM);
+  if (ret) {
+    ret = -errno;
+    log_error(-ret, "sigaddset(SIGTERM)");
+    return ret;
+  }
+
+  ret = sigprocmask(SIG_BLOCK, &blockset, &ring.sigset);
+  if (ret) {
+    ret = -errno;
+    log_error(-ret, "sigprocmask");
+    return ret;
+  }
+
+  ret = sigaction(SIGINT, &sigact, NULL);
+  if (ret) {
+    ret = -errno;
+    log_error(-ret, "sigaction(SIGINT)");
+    return ret;
+  }
+
+  ret = sigaction(SIGTERM, &sigact, NULL);
+  if (ret) {
+    ret = -errno;
+    log_error(-ret, "sigaction(SIGTERM)");
+    return ret;
+  }
 
   ret = create_io_uring(&ring);
   if (ret < 0) {
@@ -543,9 +596,19 @@ static int run_server() {
 
   while (ring.pending_ios != NULL || ring.retry_ios != NULL) {
     struct io_callback *cb;
+
     ret = io_uring_submit_all(&ring, ring.retry_ios == NULL);
     if (ret < 0)
       terminate_all_ios(&ring, -ret);
+    if (terminating_from_signal && !ring.terminated) {
+      /*
+       * Reset the signal mask so that a subsequent invocation (which
+       * hits SIG_DFL, because of SA_RESETHAND) will immediately kill
+       * the process
+       */
+      sigprocmask(SIG_SETMASK, &ring.sigset, NULL);
+      terminate_all_ios(&ring, EINTR);
+    }
 
     for (;;) {
       struct io_uring_cqe *cqe;
