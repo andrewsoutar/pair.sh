@@ -124,11 +124,6 @@ static int create_io_uring_helper(struct io_uring_desc *d, bool destroy) {
   d->cq_size = p.cq_off.cqes + p.cq_entries * sizeof *d->cqes_buf;
   d->sqes_size = p.sq_entries * sizeof (struct io_uring_sqe);
 
-  d->sq_n_entries = p.sq_entries;
-  d->sq_mask = p.sq_off.ring_mask;
-  d->cq_n_entries = p.cq_entries;
-  d->cq_mask = p.cq_off.ring_mask;
-
   if (p.features & IORING_FEAT_SINGLE_MMAP && d->cq_size > d->sq_size)
     d->sq_size = d->cq_size;
 
@@ -160,6 +155,11 @@ static int create_io_uring_helper(struct io_uring_desc *d, bool destroy) {
     ret = -errno;
     goto out_munmap_cq;
   }
+
+  d->sq_n_entries = p.sq_entries;
+  d->sq_mask = *(__u32 *) (d->sq_ring + p.sq_off.ring_mask);
+  d->cq_n_entries = p.cq_entries;
+  d->cq_mask = *(__u32 *) (d->cq_ring + p.cq_off.ring_mask);
 
   /* Fill up the submission queue buf with indices */
   for (__u32 i = 0; i < d->sq_n_entries; ++i)
