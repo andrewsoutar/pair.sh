@@ -23,20 +23,9 @@
 
 #include <linux/io_uring.h>
 
+#include "log.h"
+
 #include "include-config.h"
-
-
-static void log_error(int err, const char *format, ...) {
-  va_list ap;
-  va_start(ap, format);
-  flockfile(stderr);
-  fprintf(stderr, "%s: ", program_invocation_short_name);
-  if (format)
-    vfprintf(stderr, format, ap);
-  fprintf(stderr, "%s%s\n", format ? ": " : "", strerror(err));
-  funlockfile(stderr);
-  va_end(ap);
-}
 
 
 struct io_callback {
