@@ -607,7 +607,7 @@ static int run_server() {
        * the process
        */
       sigprocmask(SIG_SETMASK, &ring.sigset, NULL);
-      terminate_all_ios(&ring, EINTR);
+      terminate_all_ios(&ring, ECANCELED);
     }
 
     for (;;) {
