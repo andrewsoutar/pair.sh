@@ -671,18 +671,23 @@ static int run() {
     }
 
     for (size_t i = 0; i < ev.n_fds && ret > 0; ++i) {
+      struct io_callback *in_cb, *out_cb;
       if (ev.pollfds[i].revents == 0)
         continue;
       --ret;
-      if (ev.fds[i]->pollin_cb != NULL &&
-          ev.pollfds[i].revents & (POLLIN | POLLERR)) {
-        ev.pollfds[i].events &= ~POLLIN;
-        io_dispatch(&ev, ev.fds[i]->pollin_cb, &ev.pollfds[i].revents);
+
+      ev.pollfds[i].events &= ~ev.pollfds[i].revents;
+      if (ev.pollfds[i].revents & (POLLIN | POLLERR | POLLHUP)) {
+        in_cb = ev.fds[i]->pollin_cb;
+        ev.fds[i]->pollin_cb = NULL;
+        if (in_cb)
+          io_dispatch(&ev, in_cb, &ev.pollfds[i].revents);
       }
-      if (ev.fds[i]->pollout_cb != NULL &&
-          ev.pollfds[i].revents & (POLLOUT | POLLERR | POLLHUP)) {
-        ev.pollfds[i].events &= ~POLLOUT;
-        io_dispatch(&ev, ev.fds[i]->pollout_cb, &ev.pollfds[i].revents);
+      if (ev.pollfds[i].revents & (POLLOUT | POLLERR | POLLHUP)) {
+        out_cb = ev.fds[i]->pollout_cb;
+        ev.fds[i]->pollout_cb = NULL;
+        if (out_cb)
+          io_dispatch(&ev, out_cb, &ev.pollfds[i].revents);
       }
       if (ev.pollfds[i].revents & POLLNVAL)
         io_close(&ev, ev.fds[i]);
