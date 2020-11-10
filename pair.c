@@ -829,19 +829,17 @@ static int run() {
     if (ev.timer != NULL) {
       unsigned long timer_remaining;
       ret = clock_gettime(CLOCK_MONOTONIC, &time);
-      if (ret)
-        /* FIXME cleanup, or maybe just fire all the timers? */
-        return ret;
-      timer_remaining = io_timer_remaining(ev.timer, &time);
-      if (timer_remaining == 0) {
+      if (!ret)
+        timer_remaining = io_timer_remaining(ev.timer, &time);
+      if (ret || timer_remaining == 0) {
         do {
-          int status = -ETIME;
+          int ret2 = ret || -ETIME;
           struct io_timer *timer;
 
           timer = ev.timer;
           ev.timer = NULL;
-          io_dispatch(&ev, timer->cb, &status);
-        } while (ev.timer != NULL && io_timer_remaining(ev.timer, &time) == 0);
+          io_dispatch(&ev, timer->cb, &ret2);
+        } while (ev.timer != NULL && (ret || io_timer_remaining(ev.timer, &time) == 0));
         continue;
       }
       if ((timer_remaining - 1) / 1000000ul + 1 > INT_MAX)
