@@ -36,7 +36,11 @@ struct event_loop {
   struct pollfd *pollfds;
   struct io_timer *timer;
   size_t n_fds, alloc_size;
+  bool terminated;
 };
+
+static void io_dispatch(struct event_loop *ev, struct io_callback *cb,
+                        void *extra);
 
 static int event_loop_init(struct event_loop *ev) {
   ev->alloc_size = 16;
@@ -53,6 +57,7 @@ static int event_loop_init(struct event_loop *ev) {
 
   ev->timer = NULL;
   ev->n_fds = 0;
+  ev->terminated = false;
 
   return 0;
 }
@@ -311,6 +316,43 @@ static unsigned long io_timer_remaining(struct io_timer *restrict timer,
 }
 
 
+static void io_terminate(struct event_loop *ev, int err) {
+  if (ev->terminated) {
+    log_error(err, "while terminating");
+    return;
+  }
+
+  log_error(err, "terminating");
+
+  ev->terminated = true;
+
+  for (size_t i = 0; i < ev->n_fds; ++i) {
+    struct io_callback *cb;
+
+    cb = ev->fds[i]->pollin_cb;
+    if (cb) {
+      int status = -EINTR;
+      ev->fds[i]->pollin_cb = NULL;
+      io_dispatch(ev, cb, &status);
+    }
+
+    cb = ev->fds[i]->pollout_cb;
+    if (cb) {
+      int status = -EINTR;
+      ev->fds[i]->pollout_cb = NULL;
+      io_dispatch(ev, cb, &status);
+    }
+  }
+
+  if (ev->timer) {
+    int status = -EINTR;
+    struct io_timer *timer = ev->timer;
+    ev->timer = NULL;
+    io_dispatch(ev, timer->cb, &status);
+  }
+}
+
+
 static int io_socket(struct event_loop *ev, io_fd_t *fd,
                      sa_family_t domain, int type, int protocol) {
   int ret;
@@ -336,7 +378,7 @@ static int io_connect(struct event_loop *ev, struct io_callback *cb,
       ret = -EINPROGRESS;
       io_register_write_callback(ev, socket, cb);
     }
-  } else {
+  } else if ((ret = *(int *) extra) == -EAGAIN) {
     int socket_raw_fd;
     struct sockaddr_storage ss;
 
@@ -548,15 +590,14 @@ static int io_net_conn_sm(struct event_loop *ev,
     ret = -EDESTADDRREQ;
     c->happy_eyeballs_list = NULL;
     c->timer_set = false;
-    for (c->i = 0; c->i < sizeof config_addrs / sizeof *config_addrs; ++c->i) {
+    for (c->i = 0;
+         c->i < sizeof config_addrs / sizeof *config_addrs && !ev->terminated;
+         ++c->i) {
       /* Reset the timer to 250ms */
       ret = io_timer_set(ev, &c->cb, &c->timer, 250000000);
       c->timer_set = (ret == 0);
 
-      /* FIXME why would we get EINTR from this??? */
-      do
-        ret = io_happy_eyeballs_start(ev, c);
-      while (ret == -EINTR);
+      ret = io_happy_eyeballs_start(ev, c);
 
       if (ret == -EINPROGRESS)
         if (c->timer_set)
@@ -578,7 +619,7 @@ static int io_net_conn_sm(struct event_loop *ev,
         break;
 
       if (0) case IO_NET_CONN_STATE_TIMER_FIRED:
-        ret = -ETIME;
+        ret = *(int *) extra;
     }
     /* Cancel the timer */
     io_timer_cancel(ev, &c->timer);
@@ -598,8 +639,8 @@ static int io_net_conn_sm(struct event_loop *ev,
     io_close(ev, c->fd);
   out:
     free(c);
-    log_error(-ret, "io_happy_eyeballs");
-    /* FIXME log error, terminate... */
+    if (!ev->terminated)
+      io_terminate(ev, -ret);
     return ret;
 
   }
@@ -660,11 +701,12 @@ static int run() {
       timer_remaining = io_timer_remaining(ev.timer, &time);
       if (timer_remaining == 0) {
         do {
+          int status = -ETIME;
           struct io_timer *timer;
 
           timer = ev.timer;
           ev.timer = NULL;
-          io_dispatch(&ev, timer->cb, NULL);
+          io_dispatch(&ev, timer->cb, &status);
         } while (ev.timer != NULL && io_timer_remaining(ev.timer, &time) == 0);
         continue;
       }
