@@ -818,8 +818,10 @@ static int run() {
   int ret;
 
   ret = event_loop_init(&ev);
-  if (ret)
+  if (ret) {
+    log_error(-ret, "event_loop_init");
     return ret;
+  }
 
   io_sighand_start(&ev);
   io_net_conn_start(&ev);
@@ -853,9 +855,10 @@ static int run() {
     ret = poll(ev.pollfds, ev.n_fds, timeout);
     if (ret < 0) {
       ret = -errno;
-      if (ret != -EAGAIN && ret != -EINTR)
-        /* FIXME log this error? */
+      if (ret != -EAGAIN && ret != -EINTR) {
+        log_error(-ret, "poll");
         return ret;
+      }
     }
 
     for (size_t i = 0; i < ev.n_fds && ret > 0; ++i) {
@@ -922,5 +925,7 @@ static int run() {
 }
 
 int main() {
-  run();
+  int ret;
+  ret = run();
+  return ret ? EXIT_FAILURE : EXIT_SUCCESS;
 }
