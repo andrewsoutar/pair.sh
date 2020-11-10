@@ -691,7 +691,7 @@ static int run() {
       ev.pollfds[i].events &= ~ev.pollfds[i].revents;
       if (!ev.pollfds[i].events && ev.pollfds[i].fd >= 0)
         ev.pollfds[i].fd = -ev.pollfds[i].fd - 1;
-      if (ev.pollfds[i].revents & (POLLIN | POLLERR)) {
+      if (ev.pollfds[i].revents & (POLLIN | POLLERR | POLLHUP)) {
         in_cb = ev.fds[i]->pollin_cb;
         ev.fds[i]->pollin_cb = NULL;
         if (in_cb)
