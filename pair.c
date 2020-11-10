@@ -694,14 +694,18 @@ static int run() {
       if (ev.pollfds[i].revents & (POLLIN | POLLERR | POLLHUP)) {
         in_cb = ev.fds[i]->pollin_cb;
         ev.fds[i]->pollin_cb = NULL;
-        if (in_cb)
-          io_dispatch(&ev, in_cb, &ev.pollfds[i].revents);
+        if (in_cb) {
+          int status = -EAGAIN;
+          io_dispatch(&ev, in_cb, &status);
+        }
       }
       if (ev.pollfds[i].revents & (POLLOUT | POLLERR | POLLHUP)) {
         out_cb = ev.fds[i]->pollout_cb;
         ev.fds[i]->pollout_cb = NULL;
-        if (out_cb)
-          io_dispatch(&ev, out_cb, &ev.pollfds[i].revents);
+        if (out_cb) {
+          int status = -EAGAIN;
+          io_dispatch(&ev, out_cb, &status);
+        }
       }
       if (ev.pollfds[i].revents & POLLNVAL && ev.pollfds[i].fd >= 0)
         /* FIXME should probably fire an error to relevant handlers? */
