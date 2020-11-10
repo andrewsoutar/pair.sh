@@ -32,7 +32,7 @@ typedef struct io_fd {
 } *io_fd_t;
 
 struct event_loop {
-  struct io_fd **fds;
+  void **fds, **close_fd;
   struct pollfd *pollfds;
   struct io_timer *timer;
   size_t n_fds, alloc_size;
@@ -55,6 +55,7 @@ static int event_loop_init(struct event_loop *ev) {
     return -ENOMEM;
   }
 
+  ev->close_fd = NULL;
   ev->timer = NULL;
   ev->n_fds = 0;
   ev->terminated = false;
@@ -147,27 +148,11 @@ static void io_close(struct event_loop *ev, io_fd_t fd) {
   /* Don't worry about errors on close */
   close(io_raw_fd(ev, fd));
 
-  --ev->n_fds;
-  ev->fds[fd->index] = ev->fds[ev->n_fds];
-  ev->pollfds[fd->index] = ev->pollfds[ev->n_fds];
-  ev->fds[fd->index]->index = fd->index;
+  ev->pollfds[fd->index].fd = -1;
+  ev->pollfds[fd->index].events = POLLNVAL;
+  ev->fds[fd->index] = ev->close_fd;
+  ev->close_fd = &ev->fds[fd->index];
   free(fd);
-
-  if (ev->n_fds < ev->alloc_size / 4) {
-    void *new_mem;
-    size_t new_alloc_size = ev->alloc_size / 2;
-
-    new_mem = realloc(ev->fds, sizeof *ev->fds * new_alloc_size);
-    if (new_mem == NULL)
-      return;
-    ev->alloc_size = new_alloc_size;
-    ev->fds = new_mem;
-
-    new_mem = realloc(ev->pollfds, sizeof *ev->pollfds * new_alloc_size);
-    if (new_mem == NULL)
-      return;
-    ev->pollfds = new_mem;
-  }
 }
 
 static void io_register_write_callback(struct event_loop *ev, io_fd_t fd,
@@ -329,18 +314,22 @@ static void io_terminate(struct event_loop *ev, int err) {
   for (size_t i = 0; i < ev->n_fds; ++i) {
     struct io_callback *cb;
 
-    cb = ev->fds[i]->pollin_cb;
-    if (cb) {
-      int status = -EINTR;
-      ev->fds[i]->pollin_cb = NULL;
-      io_dispatch(ev, cb, &status);
+    if (!(ev->pollfds[i].events & POLLNVAL)) {
+      cb = ((struct io_fd *) ev->fds[i])->pollin_cb;
+      if (cb) {
+        int status = -EINTR;
+        ((struct io_fd *) ev->fds[i])->pollin_cb = NULL;
+        io_dispatch(ev, cb, &status);
+      }
     }
 
-    cb = ev->fds[i]->pollout_cb;
-    if (cb) {
-      int status = -EINTR;
-      ev->fds[i]->pollout_cb = NULL;
-      io_dispatch(ev, cb, &status);
+    if (!(ev->pollfds[i].events & POLLNVAL)) {
+      cb = ((struct io_fd *) ev->fds[i])->pollout_cb;
+      if (cb) {
+        int status = -EINTR;
+        ((struct io_fd *) ev->fds[i])->pollout_cb = NULL;
+        io_dispatch(ev, cb, &status);
+      }
     }
   }
 
@@ -733,17 +722,19 @@ static int run() {
       ev.pollfds[i].events &= ~ev.pollfds[i].revents;
       if (!ev.pollfds[i].events && ev.pollfds[i].fd >= 0)
         ev.pollfds[i].fd = -ev.pollfds[i].fd - 1;
-      if (ev.pollfds[i].revents & (POLLIN | POLLERR | POLLHUP)) {
-        in_cb = ev.fds[i]->pollin_cb;
-        ev.fds[i]->pollin_cb = NULL;
+      if (!(ev.pollfds[i].events & POLLNVAL) &&
+          ev.pollfds[i].revents & (POLLIN | POLLERR | POLLHUP)) {
+        in_cb = ((struct io_fd *) ev.fds[i])->pollin_cb;
+        ((struct io_fd *) ev.fds[i])->pollin_cb = NULL;
         if (in_cb) {
           int status = -EAGAIN;
           io_dispatch(&ev, in_cb, &status);
         }
       }
-      if (ev.pollfds[i].revents & (POLLOUT | POLLERR | POLLHUP)) {
-        out_cb = ev.fds[i]->pollout_cb;
-        ev.fds[i]->pollout_cb = NULL;
+      if (!(ev.pollfds[i].events & POLLNVAL) &&
+          ev.pollfds[i].revents & (POLLOUT | POLLERR | POLLHUP)) {
+        out_cb = ((struct io_fd *) ev.fds[i])->pollout_cb;
+        ((struct io_fd *) ev.fds[i])->pollout_cb = NULL;
         if (out_cb) {
           int status = -EAGAIN;
           io_dispatch(&ev, out_cb, &status);
@@ -752,6 +743,32 @@ static int run() {
       if (ev.pollfds[i].revents & POLLNVAL && ev.pollfds[i].fd >= 0)
         /* FIXME should probably fire an error to relevant handlers? */
         io_close(&ev, ev.fds[i]);
+    }
+
+    while (ev.close_fd != NULL) {
+      size_t i = ev.close_fd - ev.fds;
+      ev.close_fd = *ev.close_fd;
+      while (ev.n_fds && ev.pollfds[ev.n_fds - 1].events & POLLNVAL)
+        --ev.n_fds;
+      if (i < ev.n_fds) {
+        --ev.n_fds;
+        ev.fds[i] = ev.fds[ev.n_fds];
+        ev.pollfds[i] = ev.pollfds[ev.n_fds];
+        ((struct io_fd *) ev.fds[i])->index = i;
+      }
+    }
+
+    if (ev.n_fds < ev.alloc_size / 4) {
+      void *new_mem;
+      ev.alloc_size /= 2;
+
+      new_mem = realloc(ev.fds, sizeof *ev.fds * ev.alloc_size);
+      if (new_mem != NULL)
+        ev.fds = new_mem;
+
+      new_mem = realloc(ev.pollfds, sizeof *ev.pollfds * ev.alloc_size);
+      if (new_mem != NULL)
+        ev.pollfds = new_mem;
     }
   }
 
