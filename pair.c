@@ -1,11 +1,13 @@
 #define _GNU_SOURCE
 
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 
 #include <assert.h>
 #include <errno.h>
 #include <limits.h>
+#include <signal.h>
 #include <string.h>
 
 #include <unistd.h>
@@ -23,7 +25,11 @@
 #include "include-config.h"
 
 struct io_callback {
-  enum { IO_NET_CONN_TIMEOUT, IO_HAPPY_EYEBALLS_CONNECT } tag;
+  enum {
+    IO_SIGHAND_SIGNALED,
+    IO_NET_CONN_TIMEOUT,
+    IO_HAPPY_EYEBALLS_CONNECT
+  } tag;
 };
 
 typedef struct io_fd {
@@ -153,6 +159,13 @@ static void io_close(struct event_loop *ev, io_fd_t fd) {
   ev->fds[fd->index] = ev->close_fd;
   ev->close_fd = &ev->fds[fd->index];
   free(fd);
+}
+
+static void io_register_read_callback(struct event_loop *ev, io_fd_t fd,
+                                       struct io_callback *cb) {
+  ev->pollfds[fd->index].fd = io_raw_fd(ev, fd);
+  ev->pollfds[fd->index].events |= POLLIN;
+  fd->pollin_cb = cb;
 }
 
 static void io_register_write_callback(struct event_loop *ev, io_fd_t fd,
@@ -444,6 +457,134 @@ static int parse_addr(struct sockaddr_storage *ss,
   } else label__##line##x##__
 
 
+/*
+ * According to the C spec, we can only read lock-free atomic
+ * variables in signal handlers
+ */
+#if ATOMIC_INT_LOCK_FREE == 2
+atomic_int global_sighand_pipe_write_fd;
+static void set_sighand_fd(int fd) {
+  atomic_store_explicit(&global_sighand_pipe_write_fd, fd,
+                        memory_order_relaxed);
+}
+static void close_sighand_fd() {
+  int fd = atomic_exchange_explicit(&global_sighand_pipe_write_fd, -1,
+                                    memory_order_relaxed);
+  if (fd >= 0)
+    close(fd);
+}
+#else
+#error "signal handler not supported on this platform"
+#endif
+
+static void sighand(int sig) {
+  /*
+   * Reset the signal handler so that a subsequent signal will
+   * automatically kill the process
+   */
+  signal(sig, SIG_DFL);
+  close_sighand_fd();
+}
+
+enum io_sighand_state { IO_SIGHAND_STATE_START, IO_SIGHAND_STATE_SIGNALED };
+struct io_sighand_closure {
+  struct io_callback cb;
+  io_fd_t pipe_read_fd;
+};
+
+static int io_sighand_sm(struct event_loop *ev,
+                         struct io_sighand_closure *c,
+                         enum io_sighand_state state,
+                         void *extra) {
+  switch (state) {
+    int ret;
+
+  case IO_SIGHAND_STATE_START:
+
+    ret = -ENOMEM;
+    c = malloc(sizeof *c);
+    if (c == NULL)
+      goto out;
+
+    {
+      int pipefds[2];
+      ret = pipe(pipefds);
+      if (ret) {
+        ret = -errno;
+        goto out;
+      }
+
+      ret = fcntl(pipefds[1], F_GETFD);
+      if (ret < 0) {
+        ret = -errno;
+        goto out;
+      }
+      ret = fcntl(pipefds[1], F_SETFD, ret | FD_CLOEXEC);
+      if (ret) {
+        ret = -errno;
+        goto out;
+      }
+      set_sighand_fd(pipefds[1]);
+
+      ret = io_make_fd(ev, &c->pipe_read_fd, pipefds[0]);
+      if (ret)
+        goto out_close_write_fd;
+    }
+
+    ret = (signal(SIGINT, &sighand) == SIG_ERR);
+    if (ret) {
+      ret = -errno;
+      goto out_close_fds;
+    }
+
+    ret = (signal(SIGTERM, &sighand) == SIG_ERR);
+    if (ret) {
+      ret = -errno;
+      goto out_reset_sigint;
+    }
+
+    c->cb = (struct io_callback) { .tag = IO_SIGHAND_SIGNALED };
+    io_register_read_callback(ev, c->pipe_read_fd, &c->cb);
+    return 0;
+
+  SM_CASE(IO_SIGHAND_STATE_SIGNALED):
+    ret = *(int *) extra;
+    if (ret == -EAGAIN)
+      ret = -ECANCELED;
+    else if (ret == -EINTR && ev->terminated)
+      ret = 0;
+
+    signal(SIGTERM, SIG_DFL);
+  out_reset_sigint:
+    signal(SIGINT, SIG_DFL);
+
+  out_close_fds:
+    io_close(ev, c->pipe_read_fd);
+  out_close_write_fd:
+    close_sighand_fd();
+
+  out:
+    free(c);
+    if (ret)
+      io_terminate(ev, -ret);
+    return ret;
+
+  }
+  assert(0);
+}
+
+static void io_sighand_start(struct event_loop *ev) {
+  io_sighand_sm(ev, NULL, IO_SIGHAND_STATE_START, NULL);
+}
+
+static void io_sighand_signaled(struct event_loop *ev,
+                                struct io_callback *cb,
+                                void *extra) {
+  io_sighand_sm(ev, (struct io_sighand_closure *) cb,
+                IO_SIGHAND_STATE_SIGNALED, extra);
+}
+
+
 enum io_net_conn_state {
   IO_NET_CONN_STATE_START,
   IO_NET_CONN_STATE_TIMER_FIRED,
@@ -657,6 +798,9 @@ static void io_net_conn_happy_eyeballs(struct event_loop *ev,
 static void io_dispatch(struct event_loop *ev, struct io_callback *cb,
                         void *extra) {
   switch (cb->tag) {
+  case IO_SIGHAND_SIGNALED:
+    io_sighand_signaled(ev, cb, extra);
+    break;
   case IO_NET_CONN_TIMEOUT:
     io_net_conn_timeout(ev, cb, extra);
     break;
@@ -675,6 +819,7 @@ static int run() {
   if (ret)
     return ret;
 
+  io_sighand_start(&ev);
   io_net_conn_start(&ev);
 
   while (ev.n_fds > 0 || ev.timer != NULL) {
