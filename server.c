@@ -23,7 +23,7 @@
 
 #include <linux/io_uring.h>
 
-#include "config.h"
+#include "include-config.h"
 
 
 static void log_error(int err, const char *format, ...) {

@@ -12,7 +12,7 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 
-#include "config.h"
+#include "include-config.h"
 
 enum {
   POLLFD_NET_SOCK,              /* Must be the last one */
