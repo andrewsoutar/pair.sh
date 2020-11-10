@@ -66,12 +66,23 @@ static void event_loop_cleanup(struct event_loop *ev) {
 
 
 static int io_raw_fd(struct event_loop *ev, io_fd_t fd) {
-  return ev->pollfds[fd->index].fd;
+  int raw_fd = ev->pollfds[fd->index].fd;
+  if (raw_fd < 0)
+    raw_fd = -(raw_fd + 1);
+  return raw_fd;
 }
 
 static int io_make_fd(struct event_loop *ev, io_fd_t *io_fd, int raw_fd) {
-  int ret = -ENOMEM;
+  int ret;
 
+  if (raw_fd < 0)
+    return -EBADF;
+
+  ret = -EMFILE;
+  if (-raw_fd < INT_MIN + 1)
+    goto out;
+
+  ret = -ENOMEM;
   if (ev->n_fds == ev->alloc_size) {
     void *new_mem;
     size_t new_alloc_size = 2 * ev->alloc_size;
@@ -117,7 +128,7 @@ static int io_make_fd(struct event_loop *ev, io_fd_t *io_fd, int raw_fd) {
 
   **io_fd = (struct io_fd) { .index = ev->n_fds++ };
   ev->fds[(*io_fd)->index] = *io_fd;
-  ev->pollfds[(*io_fd)->index] = (struct pollfd) { .fd = raw_fd };
+  ev->pollfds[(*io_fd)->index] = (struct pollfd) { .fd = -raw_fd - 1 };
   return 0;
 
 out:
@@ -156,6 +167,7 @@ static void io_close(struct event_loop *ev, io_fd_t fd) {
 
 static void io_register_write_callback(struct event_loop *ev, io_fd_t fd,
                                        struct io_callback *cb) {
+  ev->pollfds[fd->index].fd = io_raw_fd(ev, fd);
   ev->pollfds[fd->index].events |= POLLOUT;
   fd->pollout_cb = cb;
 }
@@ -677,7 +689,9 @@ static int run() {
       --ret;
 
       ev.pollfds[i].events &= ~ev.pollfds[i].revents;
-      if (ev.pollfds[i].revents & (POLLIN | POLLERR | POLLHUP)) {
+      if (!ev.pollfds[i].events && ev.pollfds[i].fd >= 0)
+        ev.pollfds[i].fd = -ev.pollfds[i].fd - 1;
+      if (ev.pollfds[i].revents & (POLLIN | POLLERR)) {
         in_cb = ev.fds[i]->pollin_cb;
         ev.fds[i]->pollin_cb = NULL;
         if (in_cb)
@@ -689,7 +703,8 @@ static int run() {
         if (out_cb)
           io_dispatch(&ev, out_cb, &ev.pollfds[i].revents);
       }
-      if (ev.pollfds[i].revents & POLLNVAL)
+      if (ev.pollfds[i].revents & POLLNVAL && ev.pollfds[i].fd >= 0)
+        /* FIXME should probably fire an error to relevant handlers? */
         io_close(&ev, ev.fds[i]);
     }
   }
