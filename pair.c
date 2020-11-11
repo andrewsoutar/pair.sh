@@ -404,10 +404,10 @@ static int io_connect(struct event_loop *ev, struct io_callback *cb,
         ret = -errno;
         if (ret == -ENOPROTOOPT) {
           /* Try to get the return value from error slippage */
-          ret = read(socket_raw_fd, &(char[1]) { 0 }, 1);
-          if (ret < 0)
+          ret = (read(socket_raw_fd, &(char[1]) { 0 }, 1) < 0);
+          if (ret)
             ret = -errno;
-          if (ret >= 0 || ret == -EINTR || ret == -EAGAIN || ret == -EWOULDBLOCK)
+          if (!ret || ret == -EINTR || ret == -EAGAIN || ret == -EWOULDBLOCK)
             ret = -ENOTCONN;
         }
       }
