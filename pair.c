@@ -316,11 +316,13 @@ static unsigned long io_timer_remaining(struct io_timer *restrict timer,
 
 static void io_terminate(struct event_loop *ev, int err) {
   if (ev->terminated) {
-    log_error(err, "while terminating");
+    if (err)
+      log_error(err, "while terminating");
     return;
   }
 
-  log_error(err, "terminating");
+  if (err)
+    log_error(err, "terminating");
 
   ev->terminated = true;
 
