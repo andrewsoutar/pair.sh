@@ -151,6 +151,9 @@ out:
 static void io_close(struct event_loop *ev, io_fd_t fd) {
   /* FIXME cancel any remaining IO callbacks? */
 
+  if (ev->pollfds[fd->index].events & POLLNVAL)
+    return;
+
   /* Don't worry about errors on close */
   close(io_raw_fd(ev, fd));
 
@@ -893,8 +896,11 @@ static int run() {
         io_dispatch_callback_by_index(&ev, POLLIN, i, &(int) { -EAGAIN });
       if (ev.pollfds[i].revents & (POLLOUT | POLLERR | POLLHUP))
         io_dispatch_callback_by_index(&ev, POLLOUT, i, &(int) { -EAGAIN });
-      if (ev.pollfds[i].revents & POLLNVAL && ev.pollfds[i].fd >= 0)
+      if (ev.pollfds[i].revents & POLLNVAL && ev.pollfds[i].fd >= 0) {
+        io_dispatch_callback_by_index(&ev, POLLIN, i, &(int) { -EBADF });
+        io_dispatch_callback_by_index(&ev, POLLOUT, i, &(int) { -EBADF });
         io_close(&ev, ev.fds[i]);
+      }
     }
 
     while (ev.close_fd != NULL) {
