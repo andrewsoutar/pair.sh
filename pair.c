@@ -214,6 +214,7 @@ static const unsigned long sec = 1000000000ul;
 
 _Pragma("GCC diagnostic push")
 _Pragma("GCC diagnostic ignored \"-Wsign-compare\"")
+_Pragma("GCC diagnostic ignored \"-Wsign-conversion\"")
 static unsigned long
 do_checked_time_subtract(const struct timespec *restrict t1,
                          const struct timespec *restrict t2)
@@ -289,13 +290,13 @@ static unsigned long io_timer_remaining(struct io_timer *restrict timer,
   if (time->tv_sec == timer->time.tv_sec) {
     long delta_ns = timer->time.tv_nsec - time->tv_nsec;
     if (delta_ns >= 0) {
-      if (timer->duration_ns > ULONG_MAX - delta_ns)
+      if (timer->duration_ns > ULONG_MAX - (unsigned long) delta_ns)
         return ULONG_MAX;
     } else {
       if (timer->duration_ns < (unsigned long) -delta_ns)
         return 0;
     }
-    return timer->duration_ns + delta_ns;
+    return timer->duration_ns + (unsigned long) delta_ns;
   }
 
   if (time->tv_sec > timer->time.tv_sec) {
@@ -862,7 +863,7 @@ static int run() {
       if ((timer_remaining - 1) / 1000000ul + 1 > INT_MAX)
         timeout = INT_MAX;
       else
-        timeout = (timer_remaining - 1) / 1000000ul + 1;
+        timeout = (int) ((timer_remaining - 1) / 1000000ul + 1);
     }
 
     ret = poll(ev.pollfds, ev.n_fds, timeout);
@@ -884,7 +885,7 @@ static int run() {
         continue;
       --ret;
 
-      ev.pollfds[i].events &= ~ev.pollfds[i].revents;
+      ev.pollfds[i].events &= (short) ~ev.pollfds[i].revents;
       if (!ev.pollfds[i].events && ev.pollfds[i].fd >= 0)
         ev.pollfds[i].fd = -ev.pollfds[i].fd - 1;
       if (!(ev.pollfds[i].events & POLLNVAL) &&
@@ -911,7 +912,7 @@ static int run() {
     }
 
     while (ev.close_fd != NULL) {
-      size_t i = ev.close_fd - ev.fds;
+      size_t i = (size_t) (ev.close_fd - ev.fds);
       ev.close_fd = *ev.close_fd;
       while (ev.n_fds && ev.pollfds[ev.n_fds - 1].events & POLLNVAL)
         --ev.n_fds;
