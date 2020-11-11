@@ -199,37 +199,18 @@ static void io_register_write_callback(struct event_loop *ev, io_fd_t fd,
 
 
 struct io_timer {
-  struct timespec time;
   struct io_callback *cb;
+  /*
+   * FIXME these pointers implement a min-heap with a fairly complex
+   * structure, documentation needed
+   */
+  struct io_timer *child, *prev, *next;
+  struct timespec time;
   unsigned long duration_ns;
 };
 
-static void io_timer_cancel(struct event_loop *ev, struct io_timer *timer) {
-  /* FIXME allow multiple timers */
-  assert(ev->timer == NULL || ev->timer == timer);
-  ev->timer = NULL;
-}
-
-static int io_timer_set(struct event_loop *ev, struct io_callback *cb,
-                        struct io_timer *timer, unsigned long duration_ns) {
-  int ret;
-
-  io_timer_cancel(ev, timer);
-
-  timer->cb = cb;
-  timer->duration_ns = duration_ns;
-
-  ret = clock_gettime(CLOCK_MONOTONIC, &timer->time);
-  if (ret) {
-    ret = -errno;
-    return ret;
-  }
-
-  /* FIXME allow multiple timers */
-  assert(ev->timer == NULL || ev->timer == timer);
-  ev->timer = timer;
-
-  return ret;
+static void io_timer_init(struct io_timer *timer) {
+  timer->prev = NULL;
 }
 
 static const unsigned long sec = 1000000000ul;
@@ -267,12 +248,7 @@ do_checked_time_subtract(const struct timespec *restrict t1,
     return 0;
   else
     ret = (unsigned long) t1->tv_sec - (unsigned long) t2->tv_sec;
-  if (ret == 0)
-    /*
-     * This shouldn't happen, but might if time_t is floating-point or
-     * something
-     */
-    ret = 1;
+  assert(ret != 0);
 
   delta_ns = t1->tv_nsec - t2->tv_nsec;
 
@@ -334,6 +310,271 @@ static unsigned long io_timer_remaining(struct io_timer *restrict timer,
       return ULONG_MAX;
     return timer->duration_ns + ret;
   }
+}
+
+static bool io_timer_swap_parent_child(struct io_timer **root_p,
+                                       struct io_timer *parent,
+                                       struct io_timer *child) {
+  unsigned long remaining;
+  struct io_timer *tmp;
+
+  remaining = io_timer_remaining(parent, &child->time);
+  if (remaining != UINT_MAX && remaining <= child->duration_ns)
+    return false;
+
+  /* Swap outgoing pointers */
+  tmp = parent->child;
+  parent->child = child->child;
+  child->child = tmp;
+
+  tmp = parent->prev;
+  parent->prev = child->prev;
+  child->prev = tmp;
+
+  tmp = parent->next;
+  parent->next = child->next;
+  child->next = tmp;
+
+  /* Swap parent and child pointers to make fixups more clear */
+  tmp = parent;
+  parent = child;
+  child = tmp;
+
+  if (*root_p == child) {
+    *root_p = parent;
+    if (parent->next == parent)
+      parent->next = child;
+    else
+      parent->next->prev = parent;
+  } else if (parent->next->prev == child) {
+    /* parent is a right node */
+    parent->next->prev = parent;
+
+    assert(parent->prev->child->next == child);
+    parent->prev->child->next = parent;
+  } else {
+    /* parent is a left node */
+    assert(parent->prev->next == child);
+    parent->prev->next = parent;
+
+    assert(parent->next->prev->child == child);
+    parent->next->prev->child = parent;
+  }
+
+  assert((*root_p)->prev != child);
+  if ((*root_p)->prev == parent)
+    (*root_p)->prev = child;
+
+  if (parent->child == parent) {
+    /* child is a left child */
+    parent->child = child;
+    if ((*root_p)->prev == child) {
+      child->next = parent;
+    } else {
+      assert(child->next->prev == child);
+      child->next->prev = parent;
+    }
+    if (child->prev == child) {
+      child->prev = parent;
+    } else {
+      assert(child->prev->next == parent);
+      child->prev->next = child;
+    }
+    /* FIXME fixup prev to point to me, carefully */
+  } else {
+    /* child is a right child */
+    assert(child->prev == child);
+    child->prev = parent;
+
+    assert(parent->child->next == parent);
+    parent->child->next = child;
+
+    if ((*root_p)->prev != child) {
+      assert(child->next->prev == parent);
+      child->next->prev = child;
+    }
+  }
+
+  if (child->child != NULL) {
+    if (child->child == (*root_p)->prev) {
+      assert(child->child->next == parent);
+      child->child->next = child;
+    } else {
+      assert(child->child->next->prev == parent);
+      child->child->next->prev = child;
+    }
+  }
+
+  return true;
+}
+
+static bool io_timer_bubble_up(struct io_timer **root_p, struct io_timer *t) {
+  bool ret = false;
+  struct io_timer *parent;
+
+  do {
+    if (t == *root_p)
+      break;
+    else if (t == (*root_p)->prev)
+      parent = t->next;
+    else if (t->next->prev != t)
+      parent = t->next->prev;
+    else
+      parent = t->prev;
+  } while (io_timer_swap_parent_child(root_p, parent, t) && (ret = true));
+
+  return ret;
+}
+
+static bool io_timer_bubble_down(struct io_timer **root_p, struct io_timer *t) {
+  bool ret = false;
+  struct io_timer *child;
+
+  do {
+    if (t->child == NULL)
+      break;
+    else if (t->child == (*root_p)->prev)
+      child = t->child;
+    else {
+      unsigned long remaining;
+      remaining = io_timer_remaining(t->child, &t->child->next->time);
+      if (remaining == 0 || remaining < t->child->next->duration_ns)
+        child = t->child;
+      else
+        child = t->child->next;
+    }
+  } while (io_timer_swap_parent_child(root_p, t, child) && (ret = true));
+
+  return ret;
+}
+
+static int io_timer_set(struct event_loop *ev, struct io_callback *cb,
+                        struct io_timer *timer, unsigned long duration_ns) {
+  int ret;
+
+  timer->cb = cb;
+  timer->duration_ns = duration_ns;
+
+  ret = clock_gettime(CLOCK_MONOTONIC, &timer->time);
+  if (ret) {
+    ret = -errno;
+    return ret;
+  }
+
+  if (timer->prev != NULL) {
+    /* The timer is already in the heap, try bubbling down */
+    if (io_timer_bubble_down(&ev->timer, timer))
+      return 0;
+  } else {
+    /* The timer is not already in the heap, add it */
+    timer->child = NULL;
+    timer->next = NULL;
+
+    if (ev->timer == NULL)
+      ev->timer = timer;
+    else if (ev->timer->prev->next == NULL) {
+      /*
+       * The last node is either the root or a right child, so we're
+       * creating a left child
+       */
+      struct io_timer *parent = ev->timer->prev->prev->next;
+      if (parent == NULL)
+        parent = ev->timer;
+
+      timer->prev = ev->timer->prev;
+      timer->next = parent;
+
+      assert(parent->child == NULL);
+      parent->child = timer;
+      ev->timer->prev->next = timer;
+    } else {
+      /* We're creating a right child */
+      timer->prev = ev->timer->prev->next;
+      ev->timer->prev->next = timer;
+    }
+
+    ev->timer->prev = timer;
+  }
+
+  io_timer_bubble_up(&ev->timer, timer);
+
+  return 0;
+}
+
+static void io_timer_cancel(struct event_loop *ev, struct io_timer *timer) {
+  struct io_timer *replacement;
+  bool bubble_down_only = false;
+  assert(ev->timer != NULL && timer->prev != NULL);
+
+  replacement = ev->timer->prev;
+  if (replacement == ev->timer) {
+    /* root node */
+    assert(replacement == timer);
+    ev->timer = NULL;
+    bubble_down_only = true;
+  } else if (replacement->next == NULL) {
+    /* right node */
+    ev->timer->prev = replacement->prev->child;
+    ev->timer->prev->next = replacement->prev;
+  } else {
+    /* left node */
+    ev->timer->prev = replacement->prev;
+    assert(replacement->next->child == replacement);
+    replacement->next->child = NULL;
+    assert(replacement->prev->next == replacement);
+    replacement->prev->next = NULL;
+  }
+
+  if (timer != replacement) {
+    replacement->child = timer->child;
+    replacement->prev = timer->prev;
+    replacement->next = timer->next;
+
+    if (ev->timer == timer) {
+      /* root */
+      ev->timer = replacement;
+      if (ev->timer->prev != timer) {
+        assert(replacement->next->prev == timer);
+        replacement->next->prev = replacement;
+      }
+    } else if (replacement->prev->next == timer) {
+      struct io_timer *parent;
+      /* left node */
+      replacement->prev->next = replacement;
+      if (ev->timer->prev == timer)
+        parent = replacement->next;
+      else
+        parent = replacement->next->prev;
+      assert(parent->child == timer);
+      parent->child = replacement;
+    } else {
+      /* right node */
+      assert(replacement->prev->child->next == timer);
+      replacement->prev->child->next = replacement;
+      if (ev->timer->prev != timer) {
+        assert(replacement->next->prev == timer);
+        replacement->next->prev = replacement;
+      }
+    }
+
+    if (ev->timer->prev == timer)
+      ev->timer->prev = replacement;
+    else if (replacement->child != NULL) {
+      if (ev->timer->prev == replacement->child) {
+        assert(replacement->child->next == timer);
+        replacement->child->next = replacement;
+      } else {
+        assert(replacement->child->next->prev == timer);
+        replacement->child->next->prev = replacement;
+      }
+    }
+  }
+
+  if (bubble_down_only || !io_timer_bubble_up(&ev->timer, replacement))
+    io_timer_bubble_down(&ev->timer, replacement);
+
+  /* Mark timer as not in the heap */
+  timer->prev = NULL;
 }
 
 
@@ -741,6 +982,8 @@ static int io_net_conn_sm(struct event_loop *ev,
     ret = -EDESTADDRREQ;
     c->happy_eyeballs_list = NULL;
     c->timer_set = false;
+    io_timer_init(&c->timer);
+
     for (c->i = 0;
          c->i < sizeof config_addrs / sizeof *config_addrs && !ev->terminated;
          ++c->i) {
@@ -857,10 +1100,9 @@ static int run() {
       if (ret || timer_remaining == 0) {
         do {
           int ret2 = ret || -ETIME;
-          struct io_timer *timer;
+          struct io_timer *timer = ev.timer;
 
-          timer = ev.timer;
-          ev.timer = NULL;
+          io_timer_cancel(&ev, timer);
           io_dispatch(&ev, timer->cb, &ret2);
         } while (ev.timer != NULL && (ret || io_timer_remaining(ev.timer, &time) == 0));
         continue;
