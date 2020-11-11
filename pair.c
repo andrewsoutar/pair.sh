@@ -161,6 +161,25 @@ static void io_close(struct event_loop *ev, io_fd_t fd) {
   free(fd);
 }
 
+static void io_dispatch_callback_by_index(struct event_loop *ev, short event,
+                                          size_t i, void *extra) {
+  struct io_fd *fd;
+  struct io_callback *cb, **cb_p;
+  if (!(ev->pollfds[i].events & POLLNVAL)) {
+    fd = ev->fds[i];
+    if (event == POLLIN)
+      cb_p = &fd->pollin_cb;
+    else
+      cb_p = &fd->pollout_cb;
+    cb = *cb_p;
+
+    ev->pollfds[i].events &= (short) ~event;
+    *cb_p = NULL;
+
+    io_dispatch(ev, cb, extra);
+  }
+}
+
 static void io_register_read_callback(struct event_loop *ev, io_fd_t fd,
                                        struct io_callback *cb) {
   ev->pollfds[fd->index].fd = io_raw_fd(ev, fd);
@@ -328,25 +347,8 @@ static void io_terminate(struct event_loop *ev, int err) {
   ev->terminated = true;
 
   for (size_t i = 0; i < ev->n_fds; ++i) {
-    struct io_callback *cb;
-
-    if (!(ev->pollfds[i].events & POLLNVAL)) {
-      cb = ((struct io_fd *) ev->fds[i])->pollin_cb;
-      if (cb) {
-        int status = -EINTR;
-        ((struct io_fd *) ev->fds[i])->pollin_cb = NULL;
-        io_dispatch(ev, cb, &status);
-      }
-    }
-
-    if (!(ev->pollfds[i].events & POLLNVAL)) {
-      cb = ((struct io_fd *) ev->fds[i])->pollout_cb;
-      if (cb) {
-        int status = -EINTR;
-        ((struct io_fd *) ev->fds[i])->pollout_cb = NULL;
-        io_dispatch(ev, cb, &status);
-      }
-    }
+    io_dispatch_callback_by_index(ev, POLLIN, i, &(int) { -EINTR });
+    io_dispatch_callback_by_index(ev, POLLOUT, i, &(int) { -EINTR });
   }
 
   if (ev->timer) {
@@ -880,7 +882,6 @@ static int run() {
     }
 
     for (size_t i = 0; i < ev.n_fds && ret > 0; ++i) {
-      struct io_callback *in_cb, *out_cb;
       if (ev.pollfds[i].revents == 0)
         continue;
       --ret;
@@ -888,26 +889,11 @@ static int run() {
       ev.pollfds[i].events &= (short) ~ev.pollfds[i].revents;
       if (!ev.pollfds[i].events && ev.pollfds[i].fd >= 0)
         ev.pollfds[i].fd = -ev.pollfds[i].fd - 1;
-      if (!(ev.pollfds[i].events & POLLNVAL) &&
-          ev.pollfds[i].revents & (POLLIN | POLLERR | POLLHUP)) {
-        in_cb = ((struct io_fd *) ev.fds[i])->pollin_cb;
-        ((struct io_fd *) ev.fds[i])->pollin_cb = NULL;
-        if (in_cb) {
-          int status = -EAGAIN;
-          io_dispatch(&ev, in_cb, &status);
-        }
-      }
-      if (!(ev.pollfds[i].events & POLLNVAL) &&
-          ev.pollfds[i].revents & (POLLOUT | POLLERR | POLLHUP)) {
-        out_cb = ((struct io_fd *) ev.fds[i])->pollout_cb;
-        ((struct io_fd *) ev.fds[i])->pollout_cb = NULL;
-        if (out_cb) {
-          int status = -EAGAIN;
-          io_dispatch(&ev, out_cb, &status);
-        }
-      }
+      if (ev.pollfds[i].revents & (POLLIN | POLLERR | POLLHUP))
+        io_dispatch_callback_by_index(&ev, POLLIN, i, &(int) { -EAGAIN });
+      if (ev.pollfds[i].revents & (POLLOUT | POLLERR | POLLHUP))
+        io_dispatch_callback_by_index(&ev, POLLOUT, i, &(int) { -EAGAIN });
       if (ev.pollfds[i].revents & POLLNVAL && ev.pollfds[i].fd >= 0)
-        /* FIXME should probably fire an error to relevant handlers? */
         io_close(&ev, ev.fds[i]);
     }
 
