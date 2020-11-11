@@ -464,16 +464,29 @@ static int parse_addr(struct sockaddr_storage *ss,
  * variables in signal handlers
  */
 #if ATOMIC_INT_LOCK_FREE == 2
-atomic_int global_sighand_pipe_write_fd;
+atomic_int global_sighand_pipe_write_fd, global_last_signal = 0;
+static int get_last_signal() {
+  /* SYNCHRONIZES WITH fence in set_last_signal */
+  atomic_thread_fence(memory_order_acquire);
+  return atomic_load_explicit(&global_last_signal, memory_order_relaxed);
+}
+static void set_last_signal(int sig) {
+  atomic_store_explicit(&global_last_signal, sig, memory_order_relaxed);
+  /* SYNCHRONIZES WITH fence in get_last_signal */
+  atomic_thread_fence(memory_order_release);
+}
 static void set_sighand_fd(int fd) {
   atomic_store_explicit(&global_sighand_pipe_write_fd, fd,
                         memory_order_relaxed);
 }
-static void close_sighand_fd() {
+static bool close_sighand_fd() {
   int fd = atomic_exchange_explicit(&global_sighand_pipe_write_fd, -1,
                                     memory_order_relaxed);
-  if (fd >= 0)
+  if (fd >= 0) {
     close(fd);
+    return true;
+  } else
+    return false;
 }
 #else
 #error "signal handler not supported on this platform"
@@ -485,7 +498,9 @@ static void sighand(int sig) {
    * automatically kill the process
    */
   signal(sig, SIG_DFL);
-  close_sighand_fd();
+  set_last_signal(sig);
+  if (!close_sighand_fd())
+    raise(sig);
 }
 
 enum io_sighand_state { IO_SIGHAND_STATE_START, IO_SIGHAND_STATE_SIGNALED };
@@ -551,9 +566,7 @@ static int io_sighand_sm(struct event_loop *ev,
 
   SM_CASE(IO_SIGHAND_STATE_SIGNALED):
     ret = *(int *) extra;
-    if (ret == -EAGAIN)
-      ret = -ECANCELED;
-    else if (ret == -EINTR && ev->terminated)
+    if (ret == -EAGAIN || (ret == -EINTR && ev->terminated))
       ret = 0;
 
     signal(SIGTERM, SIG_DFL);
@@ -857,6 +870,10 @@ static int run() {
       ret = -errno;
       if (ret != -EAGAIN && ret != -EINTR) {
         log_error(-ret, "poll");
+        /* 
+         * FIXME we might want to try to do a bit more cleanup here?
+         * Signals at least?
+         */
         return ret;
       }
     }
@@ -925,7 +942,10 @@ static int run() {
 }
 
 int main() {
-  int ret;
+  int ret, sig;
   ret = run();
+  sig = get_last_signal();
+  if (sig)
+    raise(sig);
   return ret ? EXIT_FAILURE : EXIT_SUCCESS;
 }
