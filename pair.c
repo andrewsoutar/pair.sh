@@ -149,8 +149,6 @@ out:
 }
 
 static void io_close(struct event_loop *ev, io_fd_t fd) {
-  /* FIXME cancel any remaining IO callbacks? */
-
   if (ev->pollfds[fd->index].events & POLLNVAL)
     return;
 
@@ -203,6 +201,37 @@ struct io_timer {
   /*
    * FIXME these pointers implement a min-heap with a fairly complex
    * structure, documentation needed
+   */
+  /*
+   * These pointers implement a threaded min-heap, with the key being
+   * the expiration of the timer. The heap has a fairly complex
+   * structure so that it can be implemented using only three pointers
+   * (a naive implementation requires five - left child, right child,
+   * parent, next node, prev node).
+   *
+   * next - always points to the "next" node in a wraparound traversal
+   * of the tree. This is a traversal which starts at the root and
+   * traverses each level left-to-right, wrapping around to the next
+   * level when it reaches the end of the one it's on. If the last
+   * node in this traversal is a left child, its next pointer points
+   * to its parent (because its prev node does not - see below),
+   * otherwise its next node is null.
+   *
+   * child - always points to a node's left child. Since the heap is
+   * always a left-filled binary tree, any node which has a child has
+   * a left child. The right child, if any, is accessed using the left
+   * child's next pointer.
+   *
+   * prev - on a left child, points to the previous node in the
+   * wraparound traversal. On a right child, points to the parent (a
+   * left child can access its parent using next->prev). On the root,
+   * points to the last node in a wraparound traversal of the tree. (A
+   * new node added to the heap will be added at a point in the
+   * wraparound traversal directly after this node, to maintain the
+   * left-filled-tree property.)
+   *
+   * Beyond that mess of a tree structure, this is just a plain old
+   * min-heap.
    */
   struct io_timer *child, *prev, *next;
   struct timespec time;
@@ -923,7 +952,7 @@ static int io_happy_eyeballs_sm(struct event_loop *ev,
     else {
       if (0) SM_CASE(IO_HAPPY_EYEBALLS_STATE_CANCEL):
         ret = -ECANCELED;
-      /* FIXME make sure this won't somehow block */
+      /* We did not transmit any data so this will not block */
       io_close(ev, c->fd);
     }
 
@@ -1029,7 +1058,11 @@ static int io_net_conn_sm(struct event_loop *ev,
     /* FIXME implement the protocol here */
     fprintf(stderr, "Dummy connection opened\n");
 
-    /* FIXME make sure this won't be a blocking operation */
+    /*
+     * Make sure this won't be a blocking operation - it isn't right
+     * now because we're not sending any data, but once the protocol
+     * is implemented it might be
+     */
     io_close(ev, c->fd);
   out:
     free(c);
