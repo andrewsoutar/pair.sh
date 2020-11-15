@@ -1,8 +1,23 @@
 #define _GNU_SOURCE
 
 #include <stdlib.h>
-#include <stdatomic.h>
 #include <stdbool.h>
+
+#ifndef __FRAMAC__
+#include <stdatomic.h>
+#else
+#define ATOMIC_INT_LOCK_FREE 2
+typedef int atomic_int;
+#define atomic_thread_fence(o)
+#define atomic_load_explicit(p, o) (*(p))
+#define atomic_store_explicit(p, v, o) (*(p) = (v))
+atomic_int atomic_exchange(atomic_int *p, atomic_int v) {
+  atomic_int tmp = *p;
+  *p = v;
+  return tmp;
+}
+#define atomic_exchange_explicit(p, v, o) (atomic_exchange((p), (v)))
+#endif
 
 #include <assert.h>
 #include <errno.h>
