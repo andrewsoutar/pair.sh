@@ -263,7 +263,7 @@ do_checked_time_subtract(const struct timespec *restrict t1,
    * along the way.
    */
 
-  if (t1->tv_sec <= 0 || t2->tv_sec >= 0) {
+  if (t1->tv_sec < 0 || t2->tv_sec >= 0) {
     /*
      * They both have the same sign (see assertion) and the result
      * will be positive, so subtraction will never overflow time_t
@@ -273,7 +273,7 @@ do_checked_time_subtract(const struct timespec *restrict t1,
     if (t1->tv_sec - t2->tv_sec > bound)
       return 0;
     ret = (unsigned long) (t1->tv_sec - t2->tv_sec);
-  } else if (-(t2->tv_sec + 1) > bound - 1 || t1->tv_sec > bound + t2->tv_sec)
+  } else if (-(t2->tv_sec + 1) > bound - 1 || t1->tv_sec > bound + (unsigned long) t2->tv_sec)
     return 0;
   else
     ret = (unsigned long) t1->tv_sec - (unsigned long) t2->tv_sec;
