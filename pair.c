@@ -263,6 +263,17 @@ static const unsigned long sec = 1000000000ul;
 _Pragma("GCC diagnostic push")
 _Pragma("GCC diagnostic ignored \"-Wsign-compare\"")
 _Pragma("GCC diagnostic ignored \"-Wsign-conversion\"")
+/*@
+  logic integer time(struct timespec *t1) = t1->tv_sec * sec + t1->tv_nsec; */
+/*@
+  requires \valid_read(t1);
+  requires \valid_read(t2);
+  requires t1->tv_sec > t2->tv_sec;
+  requires 0 <= t1->tv_nsec < sec && 0 <= t2->tv_nsec < sec;
+  assigns \nothing;
+  ensures \let r = time(t1) - time(t2);
+    r > 0 && \result == ((r > ULONG_MAX) ? 0 : r);
+ */
 static unsigned long
 do_checked_time_subtract(const struct timespec *restrict t1,
                          const struct timespec *restrict t2)
@@ -322,6 +333,13 @@ do_checked_time_subtract(const struct timespec *restrict t1,
 }
 _Pragma("GCC diagnostic pop")
 
+/*@ requires \valid_read(timer) && \valid_read(time);
+    requires timer->time.tv_nsec >= 0 && timer->time.tv_nsec < 1000000000;
+    requires time->tv_nsec >= 0 && time->tv_nsec < sec;
+    assigns \nothing;
+    ensures \let r = time(&timer->time) - time(time) + timer->duration_ns;
+      \result == ((r < 0) ? 0 : (r > ULONG_MAX) ? ULONG_MAX : r);
+ */
 static unsigned long io_timer_remaining(struct io_timer *restrict timer,
                                         struct timespec *restrict time) {
   unsigned long ret;
